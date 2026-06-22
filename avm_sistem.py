@@ -4,7 +4,18 @@ import datetime
 import pandas as pd
 from PIL import Image
 import io
+# --- LİSANS KONTROLÜ (Mevcut kodun en başına ekle) ---
+from datetime import date
+LISANS_BITIS_TARIHI = date(2026, 12, 31)
 
+def lisans_kontrol():
+    return date.today() <= LISANS_BITIS_TARIHI
+
+if not lisans_kontrol():
+    st.set_page_config(page_title="Erişim Kısıtlı", layout="centered")
+    st.error("⚠️ Lisans süreniz dolmuştur. Lütfen AVM Yönetimi ile iletişime geçin.")
+    st.stop()
+# -----------------------------------------------------
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
 def vt_baglan():
