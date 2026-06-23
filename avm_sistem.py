@@ -166,6 +166,21 @@ else:
         st.header("🏢 Süper Admin (Esra) Sağlayıcı Paneli")
         st.write("Sistemi kullanan AVM'leri, lisans sürelerini ve ödeme durumlarını buradan kontrol edebilirsiniz.")
         
+        # SÜPER ADMIN ŞİFRE DEĞİŞTİRME BÖLÜMÜ (Yeni Eklenen Kısım)
+        with st.expander("🔑 Süper Admin Şifremi Değiştir"):
+            yeni_super_sifre = st.text_input("Yeni Süper Admin Şifresi Belirleyin:", type="password")
+            if st.button("Süper Şifreyi Güncelle"):
+                if yeni_super_sifre.strip() != "":
+                    with vt_baglan() as b:
+                        b.cursor().execute("UPDATE sistem_ayarlari SET deger = ? WHERE anahtar = 'super_sifre'", (yeni_super_sifre,))
+                        b.commit()
+                    st.success("🎉 Süper Admin giriş şifreniz başarıyla güncellendi! Bir sonraki girişte geçerli olacaktır.")
+                    st.rerun()
+                else:
+                    st.error("Şifre alanı boş bırakılamaz!")
+
+        st.markdown("---")
+        
         # Mevcut AVM Listesini Göster
         st.subheader("📋 Yayındaki AVM'ler ve Lisans Durumları")
         with vt_baglan() as b:
@@ -230,7 +245,6 @@ else:
     elif st.session_state["kullanici_turu"] == "yonetim":
         # --- LİSANS VE 14 GÜNLÜK DENEME SÜRESİ KONTROLÜ ---
         with vt_baglan() as b:
-            # En güncel aktif AVM kaydını lisans kontrolü için çekiyoruz
             lisans_bilgisi = b.cursor().execute("SELECT avm_adi, lisans_bitis, odeme_durumu FROM avm_listesi ORDER BY id ASC LIMIT 1").fetchone()
             
         if lisans_bilgisi:
@@ -243,7 +257,7 @@ else:
             if kalan_gun < 0:
                 st.error(f"🚨 **ERİŞİM ENGELENDİ:** {avm_adi_kayit} yönetim lisans/deneme süreniz dolmuştur! Portala erişim sağlamak için lütfen Sistem Sağlayıcınız (Esra) ile iletişime geçip ödemenizi tamamlayın.")
                 st.info(f"📋 **Mevcut Durum:** Son Bitiş Tarihi: {bitis_tarihi_str} | Ödeme Durumu: {odeme_durumu_kayit}")
-                st.stop() # Kodun çalışmasını burada keser, panele kesinlikle eriştirmez.
+                st.stop()
                 
             # 2. Senaryo: Deneme veya Normal Lisans Süresinin Bitimine 14 Gün veya Daha Az Kalmış (Uyarı Göster)
             elif kalan_gun <= 14:
