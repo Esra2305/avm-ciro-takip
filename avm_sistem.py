@@ -220,7 +220,7 @@ else:
             st.header("⚙️ Mağaza Yönetim Alanı")
             
             # ÖZELLİK: EXCEL ILE TOPLU MAĞAZA YÜKLEME SİHİRBAZI
-            with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle (85 Mağaza İçin)"):
+            with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle "):
                 st.markdown("""
                 **🚨 Önemli Kurallar:**
                 1. Yükleyeceğiniz Excel dosyasında şu 3 sütun ismi tam olarak yer almalıdır: `Mağaza Adı`, `Kat`, `Giriş Şifresi`
