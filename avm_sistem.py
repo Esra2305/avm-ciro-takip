@@ -19,10 +19,10 @@ if "giris_yapildi" not in st.session_state:
         "aktif_magaza_adi": None
     })
 
-# --- 2. GÜVENLİ VERİTABANI BAĞLANTISI (Cascade aktif edildi) ---
+# --- 2. GÜVENLİ VERİTABANI BAĞLANTISI ---
 def vt_baglan():
     baglanti = sqlite3.connect("avm_veritabani.db", timeout=30)
-    baglanti.execute("PRAGMA foreign_keys = ON") # SQLite için silme zincirini aktif tutar
+    baglanti.execute("PRAGMA foreign_keys = ON")
     return baglanti
 
 # --- 3. KRİPTOGRAFİK ŞİFRELEME ---
@@ -70,6 +70,13 @@ def veritabani_hazirla():
             FOREIGN KEY(magaza_id) REFERENCES magazalar(id) ON DELETE CASCADE
         )""")
         baglanti.commit()
+        
+        # [GÜVENLİ GÜNCELLEME]: Eski veritabanlarına uyarı saati sütununu dinamik ekler
+        try:
+            imlec.execute("ALTER TABLE avm_listesi ADD COLUMN uyari_saati TEXT DEFAULT '22:00'")
+            baglanti.commit()
+        except sqlite3.OperationalError:
+            pass 
 
 veritabani_hazirla()
 tarih_bugun = datetime.date.today().strftime("%d-%m-%Y")
@@ -198,13 +205,47 @@ else:
         secenek = st.sidebar.radio("Yönetim Menüsü:", ["📊 Raporlar & Grafikler", "📸 Kasa Fotoğrafları", "⚙️ Mağaza ve Şifre Ayarları"])
         
         if secenek == "📊 Raporlar & Grafikler":
-            st.header(f"📊 {a_adi} Veri Analizi")
+            st.header(f"📊 {a_adi} Günlük Rapor Takip Alanı")
+            
+            with vt_baglan() as b:
+                t_magazalar = b.cursor().execute("SELECT id, adi FROM magazalar WHERE avm_id = ?", (a_id,)).fetchall()
+                g_magaza_ids = [r[0] for r in b.cursor().execute("SELECT magaza_id FROM gunluk_cirolar WHERE avm_id = ? AND tarih = ?", (a_id, tarih_bugun)).fetchall()]
+            
+            if t_magazalar:
+                gonderen_listesi = [m[1] for m in t_magazalar if m[0] in g_magaza_ids]
+                gondermeyen_listesi = [m[1] for m in t_magazalar if m[0] not in g_magaza_ids]
+                
+                m_col1, m_col2, m_col3 = st.columns(3)
+                with m_col1: st.metric("Toplam Mağaza Sayısı", len(t_magazalar))
+                with m_col2: st.metric("Bugün Ciro Girenler", len(gonderen_listesi), delta=f"+{len(gonderen_listesi)}", delta_color="inverse" if len(gonderen_listesi)==0 else "normal")
+                with m_col3: st.metric("Rapor Beklenenler", len(gondermeyen_listesi), delta=f"-{len(gondermeyen_listesi)}" if len(gondermeyen_listesi)>0 else "0", delta_color="inverse")
+                
+                st.markdown("### 🗓️ Bugünün Rapor Teslim Durumu")
+                c_gond, c_bek = st.columns(2)
+                
+                with c_gond:
+                    st.success(f"✅ Cirosunu Gönderen Mağazalar ({len(gonderen_listesi)})")
+                    if gonderen_listesi:
+                        st.write(", ".join([f"**{m}**" for m in gonderen_listesi]))
+                    else: st.info("Henüz ciro girişi yapan mağaza yok.")
+                    
+                with c_bek:
+                    st.error(f"⏳ Ciro Girişi Yapmayan Mağazalar ({len(gondermeyen_listesi)})")
+                    if gondermeyen_listesi:
+                        st.write(", ".join([f"**{m}**" for m in gondermeyen_listesi]))
+                    else: st.success("Harika! Tüm mağazalar raporunu teslim etti. 🎉")
+            else:
+                st.warning("Sistemde henüz kayıtlı mağazanız yok. Önce mağaza ayarlarından listenizi yükleyin.")
+
+            st.markdown("---")
+            st.subheader("📈 Genel Ciro Dağılımı ve Geçmiş Veriler")
+            
             with vt_baglan() as b:
                 df_cirolar = pd.read_sql_query("SELECT c.tarih, m.adi as magaza_adi, m.kat, c.kdv_dahil, c.kdv_haric FROM gunluk_cirolar c JOIN magazalar m ON c.magaza_id = m.id WHERE c.avm_id = ?", b, params=(a_id,))
             if not df_cirolar.empty:
                 st.bar_chart(df_cirolar.groupby("magaza_adi")["kdv_dahil"].sum())
                 st.dataframe(df_cirolar, use_container_width=True)
-            else: st.info("Henüz veri girişi yok.")
+            else: st.info("Sistemde henüz geçmiş ciro verisi bulunmuyor.")
                 
         elif secenek == "📸 Kasa Fotoğrafları":
             st.header("📸 Z-Raporu Denetimi")
@@ -219,8 +260,26 @@ else:
         elif secenek == "⚙️ Mağaza ve Şifre Ayarları":
             st.header("⚙️ Mağaza Yönetim Alanı")
             
-            # ÖZELLİK: EXCEL ILE TOPLU MAĞAZA YÜKLEME SİHİRBAZI
-            with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle "):
+            # [YENİ ÖZELLİK]: AVM KAPANIŞ / UYARI SAATİ AYARI (YAZ - KIŞ AYARI İÇİN)
+            with st.expander("⏰ Ciro Bildirim Zamanlaması (Yaz / Kış Ayarı)"):
+                with vt_baglan() as b:
+                    mevcut_saat = b.cursor().execute("SELECT uyari_saati FROM avm_listesi WHERE id = ?", (a_id,)).fetchone()[0]
+                
+                saat_secenekleri = ["18:00", "19:00", "20:00", "21:00", "21:30", "22:00", "22:30", "23:00", "23:30"]
+                if mevcut_saat not in saat_secenekleri:
+                    saat_secenekleri.append(mevcut_saat)
+                saat_secenekleri.sort()
+                
+                yeni_saat = st.selectbox("Akşam Kapanış Bildirimi Saat Kaçta Başlasın?", saat_secenekleri, index=saat_secenekleri.index(mevcut_saat))
+                if st.button("Zamanlamayı Kaydet"):
+                    with vt_baglan() as b:
+                        b.cursor().execute("UPDATE avm_listesi SET uyari_saati = ? WHERE id = ?", (yeni_saat, a_id))
+                    st.success(f"⏰ Akşam ciro bildirim saati başarıyla '{yeni_saat}' olarak güncellendi!")
+                    st.rerun()
+
+            st.markdown("---")
+            # EXCEL ILE TOPLU MAĞAZA YÜKLEME SİHİRBAZI
+            with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle"):
                 st.markdown("""
                 **🚨 Önemli Kurallar:**
                 1. Yükleyeceğiniz Excel dosyasında şu 3 sütun ismi tam olarak yer almalıdır: `Mağaza Adı`, `Kat`, `Giriş Şifresi`
@@ -250,13 +309,11 @@ else:
                                 st.success(f"🎉 Harika! {basarili_kayit} adet mağaza Excel listesinden başarıyla içeri aktarıldı.")
                                 st.rerun()
                         else:
-                            st.error("🚨 Sütun isimleri uyuşmuyor! Excel'de sütun başlıkları 'Mağaza Adı', 'Kat' and 'Giriş Şifresi' olmalıdır.")
+                            st.error("🚨 Sütun isimleri uyuşmuyor! Excel'de sütun başlıkları 'Mağaza Adı', 'Kat' ve 'Giriş Şifresi' olmalıdır.")
                     except Exception as e:
                         st.error(f"Excel okunurken bir sorun oluştu: {e}")
 
             st.markdown("---")
-            
-            # TEKİL MAĞAZA EKLEME
             with st.expander("➕ Tek Tek Yeni Mağaza Ekle"):
                 yeni_m_adi = st.text_input("Mağaza Adı:")
                 yeni_m_kat = st.number_input("Kat:", min_value=-2, max_value=5, value=0)
@@ -269,8 +326,6 @@ else:
                         st.rerun()
             
             st.markdown("---")
-            
-            # MAĞAZA SİLME
             with st.expander("🗑️ Mağaza Sil / Sistemden Çıkar"):
                 with vt_baglan() as b:
                     mevcut_magazalar = b.cursor().execute("SELECT id, adi FROM magazalar WHERE avm_id = ?", (a_id,)).fetchall()
@@ -285,21 +340,55 @@ else:
                 else: st.info("Henüz kayıtlı mağaza yok.")
 
     # --------------------------------------------------------------------------
-    # ROLE 3: MAĞAZA PANELİ
+    # ROLE 3: MAĞAZA PANELİ (ZAMAN AYARLI VE SABAH/AKŞAM KONTROLLÜ YENİ SÜRÜM)
     # --------------------------------------------------------------------------
     elif st.session_state["kullanici_turu"] == "magaza":
         a_id = st.session_state["aktif_avm_id"]
         m_id = st.session_state["aktif_magaza_id"]
         m_adi = st.session_state["aktif_magaza_adi"]
         
+        # Zaman Değişkenleri Hazırlığı
+        simdi = datetime.datetime.now()
+        su_anki_saat = simdi.strftime("%H:%M")
+        tarih_bugun_str = simdi.strftime("%d-%m-%Y")
+        tarih_dün_str = (simdi - datetime.timedelta(days=1)).strftime("%d-%m-%Y")
+        
+        # Veritabanından limit saatini ve veri durumlarını kontrol et
+        with vt_baglan() as b:
+            ayar_uyari_saati = b.cursor().execute("SELECT uyari_saati FROM avm_listesi WHERE id = ?", (a_id,)).fetchone()[0]
+            bugun_giris_sayisi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_bugun_str)).fetchone()[0]
+            dun_giris_sayisi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_dün_str)).fetchone()[0]
+        
+        # [AKILLI UYARI MOTORU]
+        tetiklenen_uyari = None
+        
+        # Senaryo A: Akşam Kapanış Saati Geldi/Geçti ve Bugünün verisi girilmediyse
+        if su_anki_saat >= ayar_uyari_saati and bugun_giris_sayisi == 0:
+            tetiklenen_uyari = f"🚨 **AKŞAM KAPANIŞ UYARISI:** Bugünün ({tarih_bugun_str}) günlük ciro ve Z-Raporu girişi henüz yapılmamıştır. Lütfen yönetim belirlediği kapanış saati ({ayar_uyari_saati}) dolmadan verileri giriniz!"
+        
+        # Senaryo B: Sabah Mağaza Açıldı (Saat 14:00'ten önce) ve Dünkü veriyi girmeyi unuttularsa
+        elif su_anki_saat < "14:00" and dun_giris_sayisi == 0:
+            tetiklenen_uyari = f"⚠️ **SABAH AÇILIŞ UYARISI:** Dünkü ({tarih_dün_str}) ciro raporunu göndermeyi unuttuğunuz tespit edilmiştir! Lütfen aşağıdaki formdan dün tarihini seçerek eksik raporunuzu hemen tamamlayınız."
+            
+        if tetiklenen_uyari:
+            st.error(tetiklenen_uyari)
+            st.toast(tetiklenen_uyari[:60] + "...", icon="⏰")
+            
         sekme_giris, sekme_rapor = st.tabs(["💰 Günlük Ciro Girişi", "📅 Geçmiş Raporlar"])
         
         with sekme_giris:
             st.header(f"🛍️ {m_adi} Veri Girişi")
-            with vt_baglan() as b:
-                giris_var_mi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_bugun)).fetchone()[0]
             
-            if giris_var_mi > 0: st.success("🎉 Bugün için ciro girişiniz zaten yapılmıştır.")
+            # [UX GÜNCELLEMESİ]: Mağaza artık geçmişe dönük eksikleri de kapatabilsin diye dinamik takvim ekledik
+            secilen_rapor_tarihi = st.date_input("Rapor Tarihi:", datetime.date.today())
+            tarih_formatli = secilen_rapor_tarihi.strftime("%d-%m-%Y")
+            
+            # Seçilen tarih için kayıt var mı kontrol et
+            with vt_baglan() as b:
+                secilen_tarih_var_mi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_formatli)).fetchone()[0]
+            
+            if secilen_tarih_var_mi > 0: 
+                st.success(f"🎉 {tarih_formatli} tarihi için ciro girişiniz zaten sisteme kaydedilmiştir. Teşekkür ederiz!")
             else:
                 kdv_dahil = st.number_input("KDV Dahil Ciro:", min_value=0.0, step=100.0)
                 kdv_haric = st.number_input("KDV Hariç Ciro:", min_value=0.0, step=100.0)
@@ -309,10 +398,10 @@ else:
                     if yuklenen_dosya is not None:
                         foto_byte = yuklenen_dosya.read()
                         with vt_baglan() as b:
-                            b.cursor().execute("INSERT INTO gunluk_cirolar (avm_id, magaza_id, tarih, kdv_dahil, kdv_haric, kasa_foto) VALUES (?, ?, ?, ?, ?, ?)", (a_id, m_id, tarih_bugun, kdv_dahil, kdv_haric, sqlite3.Binary(foto_byte)))
-                        st.success("Veriler işlendi!")
+                            b.cursor().execute("INSERT INTO gunluk_cirolar (avm_id, magaza_id, tarih, kdv_dahil, kdv_haric, kasa_foto) VALUES (?, ?, ?, ?, ?, ?)", (a_id, m_id, tarih_formatli, kdv_dahil, kdv_haric, sqlite3.Binary(foto_byte)))
+                        st.success(f"🎉 {tarih_formatli} verileri başarıyla işlendi!")
                         st.rerun()
-                    else: st.error("Lütfen fotoğraf yükleyin!")
+                    else: st.error("Lütfen z-raporu fotoğrafını sisteme yükleyin!")
                         
         with sekme_rapor:
             with vt_baglan() as b:
