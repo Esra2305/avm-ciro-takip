@@ -7,14 +7,7 @@ from PIL import Image
 import io
 import hashlib
 from contextlib import contextmanager
-# --- OTURUM KORUMA VE OTOMATİK GİRİŞ SİSTEMİ ---
-if "oturum_acildi" not in st.session_state:
-    st.session_state["oturum_acildi"] = False
 
-# EĞER SAYFA YENİLENDİYSE: URL'den kullanıcıyı oku ve otomatik giriş yaptır
-if not st.session_state["oturum_acildi"] and "user" in st.query_params:
-    st.session_state["oturum_acildi"] = True
-    st.session_state["kullanici_adi"] = st.query_params["user"]
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
 # --- 1. OTURUM HAFIZASI KONTROLLERİ ---
@@ -62,6 +55,7 @@ def veri_oku_magazalar(avm_id):
         imlec = b.cursor()
         imlec.execute("SELECT id, adi, kat FROM magazalar WHERE avm_id = %s;", (avm_id,))
         return imlec.fetchall()
+
 @st.cache_data
 def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
     """Grafik ve analiz tablosu verilerini önbelleğe alarak dashboard'u uçurur."""
@@ -90,6 +84,7 @@ def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
             df = df[(df["tarih_gecici"] >= bas_timestamp) & (df["tarih_gecici"] <= bit_timestamp)]
             df = df.drop(columns=["tarih_gecici"])
         return df
+
 # --- 4. KRİPTOGRAFİK ŞİFRELEME ---
 def sifre_hashle(sifre):
     return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
