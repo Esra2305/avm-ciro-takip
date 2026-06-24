@@ -7,7 +7,14 @@ from PIL import Image
 import io
 import hashlib
 from contextlib import contextmanager
+# --- OTURUM KORUMA VE OTOMATİK GİRİŞ SİSTEMİ ---
+if "oturum_acildi" not in st.session_state:
+    st.session_state["oturum_acildi"] = False
 
+# EĞER SAYFA YENİLENDİYSE: URL'den kullanıcıyı oku ve otomatik giriş yaptır
+if not st.session_state["oturum_acildi"] and "user" in st.query_params:
+    st.session_state["oturum_acildi"] = True
+    st.session_state["kullanici_adi"] = st.query_params["user"]
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
 # --- 1. OTURUM HAFIZASI KONTROLLERİ ---
