@@ -6,21 +6,22 @@ import pandas as pd
 from PIL import Image
 import io
 import hashlib
-import uuid  # Koltuk sigortası oturum anahtarları için
+import uuid
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from contextlib import contextmanager
 
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
-# --- 1. JENERATÖR: BAĞLANTI HAVUZU (KASMAYI ENGELLEYEN ANA MOTOR) ---
+# --- 1. JENERATÖR: BAĞLANTI HAVUZU ---
 @st.cache_resource
 def veritabani_havuzu_olustur():
-    """Amerika ile olan internet hattını hep açık tutar, her tıklamada sıfırdan bağlanma gecikmesini siler."""
     baglanti_linki = st.secrets["DATABASE_URL"]
     return ThreadedConnectionPool(1, 10, baglanti_linki)
 
 @contextmanager
 def vt_baglan():
-    """Havuzdan boşta duran hazır bir bağlantı hattı alır ve işi bitince havuza geri bırakır."""
     havuz = veritabani_havuzu_olustur()
     baglanti = havuz.getconn()
     try:
@@ -32,11 +33,58 @@ def vt_baglan():
     finally:
         havuz.putconn(baglanti)
 
-# --- 2. KRİPTOGRAFİK ŞİFRELEME (HATA ALMAMAK İÇİN YUKARI TAŞINDI) ---
+# --- 2. KRİPTOGRAFİK ŞİFRELEME ---
 def sifre_hashle(sifre):
     return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
 
-# --- 3. VERİTABANI ŞEMA KURULUMU ---
+# --- 3. KURUMSAL OTOMATİK E-POSTA MOTORU ---
+def resmi_haturlatma_mail_at(magaza_adi, alici_email, tarih):
+    """Belirlenen mağazaya kurumsal şablonla SMTP üzerinden resmi uyarı gönderir."""
+    # Güvenlik nedeniyle mail bilgileri Streamlit Secrets'tan çekilir
+    if "EMAIL_ADRESI" not in st.secrets or "EMAIL_SIFRESI" not in st.secrets:
+        return False, "Sistem ayarlarında EMAIL_ADRESI veya EMAIL_SIFRESI eksik!"
+        
+    gonderen_email = st.secrets["EMAIL_ADRESI"]
+    gonderen_sifre = st.secrets["EMAIL_SIFRESI"]
+    
+    konu = f"⚠️ RESMİ UYARI: Günlük Ciro Raporu Gecikmesi - {tarih}"
+    
+    icerik = f"""
+    Sayın {magaza_adi} Yetkilisi,
+    
+    {tarih} tarihine ait günlük ciro verilerinizin ve Z-Raporu görselinizin AVM Ciro Pro Portal sistemine henüz girilmediği tespit edilmiştir.
+    
+    AVM yönetim mevzuatları ve sözleşme maddeleri gereği, günlük ciro girişlerinin her akşam belirlenen saatten önce eksiksiz tamamlanması yasal ve idari bir yükümlülüktür. 
+    
+    Lütfen bu e-postayı aldıktan sonra aşağıdaki bağlantıyı kullanarak geciken veri girişinizi ivedilikle tamamlayınız.
+    
+    Sisteme Giriş Adresi: https://avmcirotakip1.streamlit.app
+    
+    Saygılarımızla,
+    AVM Yönetimi Genel Müdürlüğü
+    Bilgi Sistemleri ve Denetim Departmanı
+    --------------------------------------------------
+    Not: Bu e-posta sistem tarafından otomatik olarak üretilmiştir. Ciro girişini bu esnada tamamladıysanız lütfen bu uyarıyı dikkate almayınız.
+    """
+    
+    msg = MIMEMultipart()
+    msg['From'] = gonderen_email
+    msg['To'] = alici_email
+    msg['Subject'] = konu
+    msg.attach(MIMEText(icerik, 'plain', 'utf-8'))
+    
+    try:
+        # Standart TLS / Secure SMTP (Gmail, Outlook vb. destekler)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(gonderen_email, gonderen_sifre)
+        server.sendmail(gonderen_email, alici_email, msg.as_string())
+        server.quit()
+        return True, "Başarılı"
+    except Exception as e:
+        return False, str(e)
+
+# --- 4. VERİTABANI ŞEMA KURULUMU ---
 def veritabani_hazirla():
     with vt_baglan() as baglanti:
         imlec = baglanti.cursor()
@@ -51,11 +99,14 @@ def veritabani_hazirla():
         );""")
         imlec.execute("ALTER TABLE avm_listesi ADD COLUMN IF NOT EXISTS uyari_saati TEXT DEFAULT '22:00';")
         
+        # ✉️ SÜTUN GÜNCELLEMESİ: Mağazalara kurumsal iletişim için eposta alanı eklendi
         imlec.execute("""
         CREATE TABLE IF NOT EXISTS magazalar (
             id SERIAL PRIMARY KEY, avm_id INTEGER REFERENCES avm_listesi(id) ON DELETE CASCADE,
-            adi TEXT, kat INTEGER, sifre TEXT NOT NULL
+            adi TEXT, kat INTEGER, sifre TEXT NOT NULL, eposta TEXT
         );""")
+        imlec.execute("ALTER TABLE magazalar ADD COLUMN IF NOT EXISTS eposta TEXT;")
+        
         imlec.execute("""
         CREATE TABLE IF NOT EXISTS gunluk_cirolar (
             id SERIAL PRIMARY KEY, avm_id INTEGER REFERENCES avm_listesi(id) ON DELETE CASCADE,
@@ -63,7 +114,6 @@ def veritabani_hazirla():
             kdv_dahil REAL, kdv_haric REAL, kasa_foto BYTEA
         );""")
         
-        # 🔑 F5 YENİLEME KORUMASI: Aktif oturumları tutan tablo
         imlec.execute("""
         CREATE TABLE IF NOT EXISTS aktif_oturumlar (
             token TEXT PRIMARY KEY, kullanici_turu TEXT, avm_id INTEGER, 
@@ -73,7 +123,7 @@ def veritabani_hazirla():
 veritabani_hazirla()
 tarih_bugun = datetime.date.today().strftime("%d-%m-%Y")
 
-# --- 4. OTURUM HAFIZASI VE F5 KONTROLLERİ ---
+# --- 5. OTURUM HAFIZASI VE F5 KONTROLLERİ ---
 if "giris_yapildi" not in st.session_state:
     st.session_state.update({
         "giris_yapildi": False, 
@@ -84,7 +134,6 @@ if "giris_yapildi" not in st.session_state:
         "aktif_magaza_adi": None
     })
 
-# F5 Yenileme Zırhı: URL'de token varsa veritabanından oturumu geri yükle
 if not st.session_state["giris_yapildi"] and "token" in st.query_params:
     aktif_url_token = st.query_params["token"]
     with vt_baglan() as b:
@@ -102,9 +151,7 @@ if not st.session_state["giris_yapildi"] and "token" in st.query_params:
             "aktif_magaza_adi": oturum_verisi[4]
         })
 
-# --- 5. AKILLI OTURUM BAŞLATMA VE BİTİRME MOTORU ---
 def oturum_baslat(kullanici_turu, avm_id=None, avm_adi=None, magaza_id=None, magaza_adi=None):
-    """Kullanıcıya özel token üretir, DB ve URL'e işleyerek F5'te atılmasını engeller."""
     yeni_token = str(uuid.uuid4())
     with vt_baglan() as b:
         imlec = b.cursor()
@@ -124,7 +171,7 @@ def oturum_baslat(kullanici_turu, avm_id=None, avm_adi=None, magaza_id=None, mag
     })
     st.rerun()
 
-# --- 6. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI (HIZ SİHİRBAZLARI) ---
+# --- 6. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI ---
 @st.cache_data
 def veri_oku_avm_listesi():
     with vt_baglan() as b:
@@ -136,7 +183,7 @@ def veri_oku_avm_listesi():
 def veri_oku_magazalar(avm_id):
     with vt_baglan() as b:
         imlec = b.cursor()
-        imlec.execute("SELECT id, adi, kat FROM magazalar WHERE avm_id = %s;", (avm_id,))
+        imlec.execute("SELECT id, adi, kat, eposta FROM magazalar WHERE avm_id = %s;", (avm_id,))
         return imlec.fetchall()
 
 @st.cache_data
@@ -224,9 +271,6 @@ if not st.session_state["giris_yapildi"]:
             else: 
                 st.warning("Bu AVM'ye ait mağaza bulunamadı.")
 
-# ==============================================================================
-# SİSTEM İÇİ PANEL ALANLARI
-# ==============================================================================
 else:
     col_baslik, col_cikis = st.columns([6, 1])
     with col_baslik: st.title("🏢 AVM Ciro Yönetim Portalı")
@@ -315,12 +359,40 @@ else:
             
             if t_magazalar:
                 gonderen_listesi = [m[1] for m in t_magazalar if m[0] in g_magaza_ids]
-                gondermeyen_listesi = [m[1] for m in t_magazalar if m[0] not in g_magaza_ids]
+                
+                # Hem e-posta adreslerini hem de bilgileri almak için listeyi yapılandırıyoruz
+                gondermeyen_listesi = [{"id": m[0], "adi": m[1], "eposta": m[3] if len(m)>3 else ""} for m in t_magazalar if m[0] not in g_magaza_ids]
                 
                 m_col1, m_col2, m_col3 = st.columns(3)
                 with m_col1: st.metric("Toplam Mağaza", len(t_magazalar))
                 with m_col2: st.metric("Bugün Ciro Girenler", len(gonderen_listesi))
                 with m_col3: st.metric("Rapor Beklenenler", len(gondermeyen_listesi))
+                
+                # ✉️ MAİL DENETİM MERKEZİ PANELİ
+                if gondermeyen_listesi:
+                    st.markdown("---")
+                    st.subheader("✉️ Bugün Ciro Girmeyen Mağazalar ve Resmi Hatırlatma")
+                    st.caption("Aşağıdaki listeden ciro girmeyen mağazalara tek tıkla resmi ihtar/hatırlatma e-postası gönderebilirsiniz.")
+                    
+                    for eksik in gondermeyen_listesi:
+                        c_m_adi, c_m_eposta = eksik["adi"], eksik["eposta"]
+                        col_m_adi, col_m_mail, col_m_aksiyon = st.columns([3, 3, 2])
+                        
+                        with col_m_adi:
+                            st.write(f"• **{c_m_adi}**")
+                        with col_m_mail:
+                            st.write(f"*{c_m_eposta if c_m_eposta else 'E-posta adresi girilmemiş!'}*")
+                        with col_m_aksiyon:
+                            if c_m_eposta:
+                                if st.button(f"⚠️ Mail Gönder", key=f"btn_mail_{eksik['id']}"):
+                                    with st.spinner("Resmi e-posta gönderiliyor..."):
+                                        durum, mesaj = resmi_haturlatma_mail_at(c_m_adi, c_m_eposta, tarih_bugun)
+                                        if durum:
+                                            st.toast(f"✓ {c_m_adi} için hatırlatma e-postası başarıyla gönderildi!", icon="✉️")
+                                        else:
+                                            st.error(f"Hata: {mesaj}")
+                            else:
+                                st.button("⚠️ Mail Gönder", key=f"btn_mail_{eksik['id']}", disabled=True)
                 
                 st.markdown("---")
                 st.subheader("🔍 Tarih Aralıklı Gelişmiş Analiz Filtreleri")
@@ -329,7 +401,7 @@ else:
                     bugun_dt = datetime.date.today()
                     tarih_araligi = st.date_input("Analiz Tarih Aralığı Seçin:", [bugun_dt.replace(day=1), bugun_dt])
                 
-                magaza_df_all = pd.DataFrame(t_magazalar, columns=["id", "adi", "kat"])
+                magaza_df_all = pd.DataFrame(t_magazalar, columns=["id", "adi", "kat", "eposta"])
                 with f_col2:
                     secilen_magazalar = st.multiselect("Mağaza Filtresi:", ["Tüm Mağazalar"] + magaza_df_all["adi"].tolist(), default="Tüm Mağazalar")
                 with f_col3:
@@ -390,45 +462,48 @@ else:
             st.header("⚙️ Mağaza Yönetim Alanı")
             
             with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle"):
+                st.markdown("**Şablon Sütunları:** `Mağaza Adı` | `Kat` | `Giriş Şifresi` | `E-Posta`")
                 yuklenen_excel = st.file_uploader("Excel Dosyası Seçin (.xlsx)", type=["xlsx"])
                 if yuklenen_excel is not None:
                     try:
                         df_ex = pd.read_excel(yuklenen_excel)
                         df_ex.columns = [col.strip() for col in df_ex.columns]
                         
-                        if all(col in df_ex.columns for col in ["Mağaza Adı", "Kat", "Giriş Şifresi"]):
+                        if all(col in df_ex.columns for col in ["Mağaza Adı", "Kat", "Giriş Şifresi", "E-Posta"]):
                             if st.button("🚀 Excel'den Aktar"):
                                 with vt_baglan() as b:
                                     imlec = b.cursor()
                                     for _, satir in df_ex.iterrows():
                                         m_adi = str(satir["Mağaza Adı"]).strip()
+                                        m_eposta = str(satir["E-Posta"]).strip() if "E-Posta" in df_ex.columns and pd.notna(satir["E-Posta"]) else None
                                         if m_adi and m_adi != "nan":
                                             try:
                                                 kat_no = int(satir["Kat"])
                                             except:
                                                 kat_no = 0
                                             sifre_str = str(satir["Giriş Şifresi"]).strip().split('.')[0]
-                                            imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre) VALUES (%s, %s, %s, %s);", 
-                                                           (a_id, m_adi, kat_no, sifre_hashle(sifre_str)))
+                                            imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre, eposta) VALUES (%s, %s, %s, %s, %s);", 
+                                                           (a_id, m_adi, kat_no, sifre_hashle(sifre_str), m_eposta))
                                 st.cache_data.clear()
-                                st.success("Mağazalar başarıyla aktarıldı.")
+                                st.success("Mağazalar e-posta adresleriyle birlikte başarıyla aktarıldı.")
                                 st.rerun()
                         else: 
-                            st.error("Excel sütun isimleri hatalı!")
+                            st.error("Excel sütun isimleri hatalı! Lütfen 'E-Posta' sütununun bulunduğundan emin olun.")
                     except Exception as e: 
                         st.error(f"Hata oluştu: {e}")
 
             with st.expander("➕ Tek Tek Yeni Mağaza Ekle"):
                 yeni_m_adi = st.text_input("Mağaza Adı:")
                 yeni_m_kat = st.number_input("Kat:", min_value=-2, max_value=5, value=0)
+                yeni_m_eposta = st.text_input("Mağaza Resmi E-Posta Adresi:")
                 yeni_m_sifre = st.text_input("Mağaza Şifresi:", value="1234")
                 if st.button("Mağazayı Kaydet"):
                     if yeni_m_adi.strip() != "":
                         with vt_baglan() as b:
                             imlec = b.cursor()
-                            imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre) VALUES (%s, %s, %s, %s);", (a_id, yeni_m_adi, yeni_m_kat, sifre_hashle(yeni_m_sifre)))
+                            imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre, eposta) VALUES (%s, %s, %s, %s, %s);", (a_id, yeni_m_adi, yeni_m_kat, sifre_hashle(yeni_m_sifre), yeni_m_eposta.strip() if yeni_m_eposta else None))
                         st.cache_data.clear()
-                        st.success(f"✓ {yeni_m_adi} eklendi.")
+                        st.success(f"✓ {yeni_m_adi} e-posta adresiyle eklendi.")
                         st.rerun()
             
             with st.expander("🗑️ Mağaza Sil"):
