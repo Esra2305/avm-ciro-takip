@@ -6,7 +6,7 @@ import pandas as pd
 from PIL import Image
 import io
 import hashlib
-import uuid  # Koltuk sigortası oturum anahtarları için eklendi
+import uuid  # Koltuk sigortası oturum anahtarları için
 from contextlib import contextmanager
 
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
@@ -22,7 +22,7 @@ def veritabani_havuzu_olustur():
 def vt_baglan():
     """Havuzdan boşta duran hazır bir bağlantı hattı alır ve işi bitince havuza geri bırakır."""
     havuz = veritabani_havuzu_olustur()
-    baglanti = pool = havuz.getconn()
+    baglanti = havuz.getconn()
     try:
         yield baglanti
         baglanti.commit()
@@ -32,7 +32,11 @@ def vt_baglan():
     finally:
         havuz.putconn(baglanti)
 
-# --- 2. VERİTABANI ŞEMA KURULUMU ---
+# --- 2. KRİPTOGRAFİK ŞİFRELEME (HATA ALMAMAK İÇİN YUKARI TAŞINDI) ---
+def sifre_hashle(sifre):
+    return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
+
+# --- 3. VERİTABANI ŞEMA KURULUMU ---
 def veritabani_hazirla():
     with vt_baglan() as baglanti:
         imlec = baglanti.cursor()
@@ -59,7 +63,7 @@ def veritabani_hazirla():
             kdv_dahil REAL, kdv_haric REAL, kasa_foto BYTEA
         );""")
         
-        # 🔑 F5 YENİLEME KORUMASI: Aktif oturumları tutan yeni tablo
+        # 🔑 F5 YENİLEME KORUMASI: Aktif oturumları tutan tablo
         imlec.execute("""
         CREATE TABLE IF NOT EXISTS aktif_oturumlar (
             token TEXT PRIMARY KEY, kullanici_turu TEXT, avm_id INTEGER, 
@@ -69,7 +73,7 @@ def veritabani_hazirla():
 veritabani_hazirla()
 tarih_bugun = datetime.date.today().strftime("%d-%m-%Y")
 
-# --- 3. OTURUM HAFIZASI VE F5 KONTROLLERİ ---
+# --- 4. OTURUM HAFIZASI VE F5 KONTROLLERİ ---
 if "giris_yapildi" not in st.session_state:
     st.session_state.update({
         "giris_yapildi": False, 
@@ -80,7 +84,7 @@ if "giris_yapildi" not in st.session_state:
         "aktif_magaza_adi": None
     })
 
-# F5 Yenileme Zırhı: Eğer session silindiyse ama URL'de token varsa veritabanından oturumu kurtar
+# F5 Yenileme Zırhı: URL'de token varsa veritabanından oturumu geri yükle
 if not st.session_state["giris_yapildi"] and "token" in st.query_params:
     aktif_url_token = st.query_params["token"]
     with vt_baglan() as b:
@@ -98,7 +102,7 @@ if not st.session_state["giris_yapildi"] and "token" in st.query_params:
             "aktif_magaza_adi": oturum_verisi[4]
         })
 
-# --- 4. AKILLI OTURUM BAŞLATMA VE BİTİRME MOTORU ---
+# --- 5. AKILLI OTURUM BAŞLATMA VE BİTİRME MOTORU ---
 def oturum_baslat(kullanici_turu, avm_id=None, avm_adi=None, magaza_id=None, magaza_adi=None):
     """Kullanıcıya özel token üretir, DB ve URL'e işleyerek F5'te atılmasını engeller."""
     yeni_token = str(uuid.uuid4())
@@ -120,7 +124,7 @@ def oturum_baslat(kullanici_turu, avm_id=None, avm_adi=None, magaza_id=None, mag
     })
     st.rerun()
 
-# --- 5. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI (HIZ SİHİRBAZLARI) ---
+# --- 6. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI (HIZ SİHİRBAZLARI) ---
 @st.cache_data
 def veri_oku_avm_listesi():
     with vt_baglan() as b:
@@ -159,10 +163,6 @@ def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
             df = df[(df["tarih_gecici"] >= bas_timestamp) & (df["tarih_gecici"] <= bit_timestamp)]
             df = df.drop(columns=["tarih_gecici"])
         return df
-
-# --- 6. KRİPTOGRAFİK ŞİFRELEME ---
-def sifre_hashle(sifre):
-    return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
 
 # ==============================================================================
 # GİRİŞ EKRANI PANELI
