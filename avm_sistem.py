@@ -60,13 +60,21 @@ def veri_oku_magazalar(avm_id):
 def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
     """Grafik ve analiz tablosu verilerini önbelleğe alarak dashboard'u uçurur."""
     with vt_baglan() as b:
+        # Ağır tarih dönüşümünü veritabanından alıp sadeleştiriyoruz
         query = """
             SELECT c.tarih, m.adi as magaza_adi, m.kat, c.kdv_dahil, c.kdv_haric 
             FROM gunluk_cirolar c 
             JOIN magazalar m ON c.magaza_id = m.id 
-            WHERE c.avm_id = %s AND TO_DATE(c.tarih, 'DD-MM-YYYY') BETWEEN %s AND %s
+            WHERE c.avm_id = %s
         """
-        return pd.read_sql_query(query, b, params=(a_id, bas_tar, bit_tar))
+        df = pd.read_sql_query(query, b, params=(a_id,))
+        
+        # Filtrelemeyi Python/Pandas içinde güvenli ve jet hızında yapıyoruz
+        if not df.empty:
+            df["tarih_gecici"] = pd.to_datetime(df["tarih"], format="%d-%m-%Y").dt.date
+            df = df[(df["tarih_gecici"] >= bas_tar) & (df["tarih_gecici"] <= bit_tar)]
+            df = df.drop(columns=["tarih_gecici"])
+        return df
 
 # --- 4. KRİPTOGRAFİK ŞİFRELEME ---
 def sifre_hashle(sifre):
