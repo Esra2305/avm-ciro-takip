@@ -39,8 +39,6 @@ def sifre_hashle(sifre):
 
 # --- 3. KURUMSAL OTOMATİK E-POSTA MOTORU ---
 def resmi_haturlatma_mail_at(magaza_adi, alici_email, tarih):
-    """Belirlenen mağazaya kurumsal şablonla SMTP üzerinden resmi uyarı gönderir."""
-    # Güvenlik nedeniyle mail bilgileri Streamlit Secrets'tan çekilir
     if "EMAIL_ADRESI" not in st.secrets or "EMAIL_SIFRESI" not in st.secrets:
         return False, "Sistem ayarlarında EMAIL_ADRESI veya EMAIL_SIFRESI eksik!"
         
@@ -74,7 +72,6 @@ def resmi_haturlatma_mail_at(magaza_adi, alici_email, tarih):
     msg.attach(MIMEText(icerik, 'plain', 'utf-8'))
     
     try:
-        # Standart TLS / Secure SMTP (Gmail, Outlook vb. destekler)
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(gonderen_email, gonderen_sifre)
@@ -99,7 +96,6 @@ def veritabani_hazirla():
         );""")
         imlec.execute("ALTER TABLE avm_listesi ADD COLUMN IF NOT EXISTS uyari_saati TEXT DEFAULT '22:00';")
         
-        # ✉️ SÜTUN GÜNCELLEMESİ: Mağazalara kurumsal iletişim için eposta alanı eklendi
         imlec.execute("""
         CREATE TABLE IF NOT EXISTS magazalar (
             id SERIAL PRIMARY KEY, avm_id INTEGER REFERENCES avm_listesi(id) ON DELETE CASCADE,
@@ -183,7 +179,7 @@ def veri_oku_avm_listesi():
 def veri_oku_magazalar(avm_id):
     with vt_baglan() as b:
         imlec = b.cursor()
-        imlec.execute("SELECT id, adi, kat, eposta FROM magazalar WHERE avm_id = %s;", (avm_id,))
+        imlec.execute("SELECT id, adi, kat, eposta FROM magazalar WHERE avm_id = %s ORDER BY adi ASC;", (avm_id,))
         return imlec.fetchall()
 
 @st.cache_data
@@ -359,16 +355,13 @@ else:
             
             if t_magazalar:
                 gonderen_listesi = [m[1] for m in t_magazalar if m[0] in g_magaza_ids]
-                
-                # Hem e-posta adreslerini hem de bilgileri almak için listeyi yapılandırıyoruz
-                gondermeyen_listesi = [{"id": m[0], "adi": m[1], "eposta": m[3] if len(m)>3 else ""} for m in t_magazalar if m[0] not in g_magaza_ids]
+                gondermeyen_listesi = [{"id": m[0], "adi": m[1], "eposta": m[3] if len(m)>3 and m[3] else ""} for m in t_magazalar if m[0] not in g_magaza_ids]
                 
                 m_col1, m_col2, m_col3 = st.columns(3)
                 with m_col1: st.metric("Toplam Mağaza", len(t_magazalar))
                 with m_col2: st.metric("Bugün Ciro Girenler", len(gonderen_listesi))
                 with m_col3: st.metric("Rapor Beklenenler", len(gondermeyen_listesi))
                 
-                # ✉️ MAİL DENETİM MERKEZİ PANELİ
                 if gondermeyen_listesi:
                     st.markdown("---")
                     st.subheader("✉️ Bugün Ciro Girmeyen Mağazalar ve Resmi Hatırlatma")
@@ -461,6 +454,26 @@ else:
         elif secenek == "⚙️ Mağaza ve Şifre Ayarları":
             st.header("⚙️ Mağaza Yönetim Alanı")
             
+            # 🔄 YENİ BÖLÜM: MEVCUT MAĞAZALARIN BİLGİLERİNİ GÜNCELLEME (E-POSTA SONRADAN EKLEME)
+            with st.expander("📝 Kayıtlı Mağaza Bilgilerini Güncelle (E-posta Ekleme / Değiştirme)"):
+                mevcut_m_listesi = veri_oku_magazalar(a_id)
+                if mevcut_m_listesi:
+                    m_guncel_sozluk = {m[1]: {"id": m[0], "kat": m[1], "eposta": m[3] if len(m)>3 and m[3] else ""} for m in mevcut_m_listesi}
+                    secilen_guncel_m = st.selectbox("Bilgileri Güncellenecek Mağaza:", list(m_guncel_sozluk.keys()))
+                    
+                    eski_veri = m_guncel_sozluk[secilen_guncel_m]
+                    guncel_eposta_input = st.text_input("E-Posta Adresi:", value=eski_veri["eposta"])
+                    
+                    if st.button("🔄 Bilgileri Güncelle"):
+                        with vt_baglan() as b:
+                            imlec = b.cursor()
+                            imlec.execute("UPDATE magazalar SET eposta = %s WHERE id = %s;", (guncel_eposta_input.strip() if guncel_eposta_input else None, eski_veri["id"]))
+                        st.cache_data.clear()
+                        st.success(f"✓ '{secilen_guncel_m}' e-posta adresi başarıyla güncellendi!")
+                        st.rerun()
+                else:
+                    st.info("Sistemde güncellenecek mağaza bulunmuyor.")
+
             with st.expander("📥 Excel Dosyasından Toplu Mağaza Yükle"):
                 st.markdown("**Şablon Sütunları:** `Mağaza Adı` | `Kat` | `Giriş Şifresi` | `E-Posta`")
                 yuklenen_excel = st.file_uploader("Excel Dosyası Seçin (.xlsx)", type=["xlsx"])
