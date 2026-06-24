@@ -5,6 +5,7 @@ import pandas as pd
 from PIL import Image
 import io
 import hashlib
+from contextlib import contextmanager  # Veritabanı kilidini çözen sihirli kütüphane
 
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
@@ -19,11 +20,16 @@ if "giris_yapildi" not in st.session_state:
         "aktif_magaza_adi": None
     })
 
-# --- 2. GÜVENLİ VERİTABANI BAĞLANTISI ---
+# --- 2. GÜVENLİ VE OTOMATİK KAPANAN VERİTABANI BAĞLANTISI ---
+@contextmanager
 def vt_baglan():
+    """İşlem bittiği an veritabanı bağlantısını kesinlikle kapatır ve kilitlenmeyi önler."""
     baglanti = sqlite3.connect("avm_veritabani.db", timeout=30)
     baglanti.execute("PRAGMA foreign_keys = ON")
-    return baglanti
+    try:
+        yield baglanti  # Kodun çalışacağı yer
+    finally:
+        baglanti.close()  # Telefonun ve bilgisayarın kilitlenmesini engelleyen kritik satır
 
 # --- 3. KRİPTOGRAFİK ŞİFRELEME ---
 def sifre_hashle(sifre):
@@ -71,7 +77,7 @@ def veritabani_hazirla():
         )""")
         baglanti.commit()
         
-        # [GÜVENLİ GÜNCELLEME]: Eski veritabanlarına uyarı saati sütununu dinamik ekler
+        # Eski veritabanlarına uyarı saati sütununu dinamik ekler
         try:
             imlec.execute("ALTER TABLE avm_listesi ADD COLUMN uyari_saati TEXT DEFAULT '22:00'")
             baglanti.commit()
@@ -260,7 +266,7 @@ else:
         elif secenek == "⚙️ Mağaza ve Şifre Ayarları":
             st.header("⚙️ Mağaza Yönetim Alanı")
             
-            # [YENİ ÖZELLİK]: AVM KAPANIŞ / UYARI SAATİ AYARI (YAZ - KIŞ AYARI İÇİN)
+            # AVM KAPANIŞ / UYARI SAATİ AYARI (YAZ - KIŞ AYARI İÇİN)
             with st.expander("⏰ Ciro Bildirim Zamanlaması (Yaz / Kış Ayarı)"):
                 with vt_baglan() as b:
                     mevcut_saat = b.cursor().execute("SELECT uyari_saati FROM avm_listesi WHERE id = ?", (a_id,)).fetchone()[0]
@@ -340,7 +346,7 @@ else:
                 else: st.info("Henüz kayıtlı mağaza yok.")
 
     # --------------------------------------------------------------------------
-    # ROLE 3: MAĞAZA PANELİ (ZAMAN AYARLI VE SABAH/AKŞAM KONTROLLÜ YENİ SÜRÜM)
+    # ROLE 3: MAĞAZA PANELİ (KİLİTLENME ENGELLİ VE ZAMAN KONTROLLÜ)
     # --------------------------------------------------------------------------
     elif st.session_state["kullanici_turu"] == "magaza":
         a_id = st.session_state["aktif_avm_id"]
@@ -359,7 +365,7 @@ else:
             bugun_giris_sayisi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_bugun_str)).fetchone()[0]
             dun_giris_sayisi = b.cursor().execute("SELECT COUNT(*) FROM gunluk_cirolar WHERE magaza_id = ? AND tarih = ?", (m_id, tarih_dün_str)).fetchone()[0]
         
-        # [AKILLI UYARI MOTORU]
+        # AKILLI UYARI MOTORU
         tetiklenen_uyari = None
         
         # Senaryo A: Akşam Kapanış Saati Geldi/Geçti ve Bugünün verisi girilmediyse
@@ -379,7 +385,7 @@ else:
         with sekme_giris:
             st.header(f"🛍️ {m_adi} Veri Girişi")
             
-            # [UX GÜNCELLEMESİ]: Mağaza artık geçmişe dönük eksikleri de kapatabilsin diye dinamik takvim ekledik
+            # Mağaza artık geçmişe dönük eksikleri de kapatabilsin diye dinamik takvim
             secilen_rapor_tarihi = st.date_input("Rapor Tarihi:", datetime.date.today())
             tarih_formatli = secilen_rapor_tarihi.strftime("%d-%m-%Y")
             
