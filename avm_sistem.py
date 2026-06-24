@@ -1,95 +1,38 @@
 import streamlit as st
 import psycopg2
-from psycopg2.pool import ThreadedConnectionPool  # Hız için bağlantı havuzu havuzu
+from psycopg2.pool import ThreadedConnectionPool
 import datetime
 import pandas as pd
 from PIL import Image
 import io
 import hashlib
+import uuid  # Koltuk sigortası oturum anahtarları için eklendi
 from contextlib import contextmanager
 
 st.set_page_config(page_title="AVM Ciro Pro Portal", layout="wide")
 
-# --- 1. OTURUM HAFIZASI KONTROLLERİ ---
-if "giris_yapildi" not in st.session_state:
-    st.session_state.update({
-        "giris_yapildi": False, 
-        "kullanici_turu": None, 
-        "aktif_avm_id": None, 
-        "aktif_avm_adi": None, 
-        "aktif_magaza_id": None, 
-        "aktif_magaza_adi": None
-    })
-
-# --- 2. JENERATÖR: BAĞLANTI HAVUZU (KASMAYI ENGELLEYEN ANA MOTOR) ---
+# --- 1. JENERATÖR: BAĞLANTI HAVUZU (KASMAYI ENGELLEYEN ANA MOTOR) ---
 @st.cache_resource
 def veritabani_havuzu_olustur():
     """Amerika ile olan internet hattını hep açık tutar, her tıklamada sıfırdan bağlanma gecikmesini siler."""
     baglanti_linki = st.secrets["DATABASE_URL"]
-    # En az 1, en fazla 10 kalıcı canlı hat açık tutulur
     return ThreadedConnectionPool(1, 10, baglanti_linki)
 
 @contextmanager
 def vt_baglan():
     """Havuzdan boşta duran hazır bir bağlantı hattı alır ve işi bitince havuza geri bırakır."""
     havuz = veritabani_havuzu_olustur()
-    baglanti = havuz.getconn()
+    baglanti = pool = havuz.getconn()
     try:
         yield baglanti
+        baglanti.commit()
+    except Exception as e:
+        baglanti.rollback()
+        raise e
     finally:
         havuz.putconn(baglanti)
 
-# --- 3. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI (HIZ SİHİRBAZLARI) ---
-@st.cache_data
-def veri_oku_avm_listesi():
-    """AVM listesini hafızaya alır, giriş ekranını saliseler içinde açar."""
-    with vt_baglan() as b:
-        imlec = b.cursor()
-        imlec.execute("SELECT id, avm_adi, lisans_bitis, odeme_durumu FROM avm_listesi;")
-        return imlec.fetchall()
-
-@st.cache_data
-def veri_oku_magazalar(avm_id):
-    """Bir AVM'ye ait mağaza listesini hafızada tutar, filtre değişimlerini hızlandırır."""
-    with vt_baglan() as b:
-        imlec = b.cursor()
-        imlec.execute("SELECT id, adi, kat FROM magazalar WHERE avm_id = %s;", (avm_id,))
-        return imlec.fetchall()
-
-@st.cache_data
-def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
-    """Grafik ve analiz tablosu verilerini önbelleğe alarak dashboard'u uçurur."""
-    # 🛡️ ZIRH: Streamlit'in tuple/list karmaşasını içeride otomatik çözer ve temizler
-    if isinstance(bas_tar, (list, tuple)):
-        bas_tar = bas_tar[0] if len(bas_tar) > 0 else datetime.date.today()
-    if isinstance(bit_tar, (list, tuple)):
-        bit_tar = bit_tar[1] if len(bit_tar) == 2 else (bit_tar[0] if len(bit_tar) > 0 else datetime.date.today())
-
-    with vt_baglan() as b:
-        query = """
-            SELECT c.tarih, m.adi as magaza_adi, m.kat, c.kdv_dahil, c.kdv_haric 
-            FROM gunluk_cirolar c 
-            JOIN magazalar m ON c.magaza_id = m.id 
-            WHERE c.avm_id = %s
-        """
-        df = pd.read_sql_query(query, b, params=(a_id,))
-        
-        if not df.empty:
-            bas_timestamp = pd.to_datetime(bas_tar)
-            bit_timestamp = pd.to_datetime(bit_tar)
-            
-            df["tarih_gecici"] = pd.to_datetime(df["tarih"], format="%d-%m-%Y")
-            
-            # Artık tarihler tekil nesnelere dönüştüğü için kusursuzca filtrelenir
-            df = df[(df["tarih_gecici"] >= bas_timestamp) & (df["tarih_gecici"] <= bit_timestamp)]
-            df = df.drop(columns=["tarih_gecici"])
-        return df
-
-# --- 4. KRİPTOGRAFİK ŞİFRELEME ---
-def sifre_hashle(sifre):
-    return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
-
-# --- 5. VERİTABANI ŞEMA KURULUMU ---
+# --- 2. VERİTABANI ŞEMA KURULUMU ---
 def veritabani_hazirla():
     with vt_baglan() as baglanti:
         imlec = baglanti.cursor()
@@ -115,10 +58,111 @@ def veritabani_hazirla():
             magaza_id INTEGER REFERENCES magazalar(id) ON DELETE CASCADE, tarih TEXT, 
             kdv_dahil REAL, kdv_haric REAL, kasa_foto BYTEA
         );""")
-        baglanti.commit()
+        
+        # 🔑 F5 YENİLEME KORUMASI: Aktif oturumları tutan yeni tablo
+        imlec.execute("""
+        CREATE TABLE IF NOT EXISTS aktif_oturumlar (
+            token TEXT PRIMARY KEY, kullanici_turu TEXT, avm_id INTEGER, 
+            avm_adi TEXT, magaza_id INTEGER, magaza_adi TEXT, olusturma_tarihi TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );""")
 
 veritabani_hazirla()
 tarih_bugun = datetime.date.today().strftime("%d-%m-%Y")
+
+# --- 3. OTURUM HAFIZASI VE F5 KONTROLLERİ ---
+if "giris_yapildi" not in st.session_state:
+    st.session_state.update({
+        "giris_yapildi": False, 
+        "kullanici_turu": None, 
+        "aktif_avm_id": None, 
+        "aktif_avm_adi": None, 
+        "aktif_magaza_id": None, 
+        "aktif_magaza_adi": None
+    })
+
+# F5 Yenileme Zırhı: Eğer session silindiyse ama URL'de token varsa veritabanından oturumu kurtar
+if not st.session_state["giris_yapildi"] and "token" in st.query_params:
+    aktif_url_token = st.query_params["token"]
+    with vt_baglan() as b:
+        imlec = b.cursor()
+        imlec.execute("SELECT kullanici_turu, avm_id, avm_adi, magaza_id, magaza_adi FROM aktif_oturumlar WHERE token = %s;", (aktif_url_token,))
+        oturum_verisi = imlec.fetchone()
+        
+    if oturum_verisi:
+        st.session_state.update({
+            "giris_yapildi": True,
+            "kullanici_turu": oturum_verisi[0],
+            "aktif_avm_id": oturum_verisi[1],
+            "aktif_avm_adi": oturum_verisi[2],
+            "aktif_magaza_id": oturum_verisi[3],
+            "aktif_magaza_adi": oturum_verisi[4]
+        })
+
+# --- 4. AKILLI OTURUM BAŞLATMA VE BİTİRME MOTORU ---
+def oturum_baslat(kullanici_turu, avm_id=None, avm_adi=None, magaza_id=None, magaza_adi=None):
+    """Kullanıcıya özel token üretir, DB ve URL'e işleyerek F5'te atılmasını engeller."""
+    yeni_token = str(uuid.uuid4())
+    with vt_baglan() as b:
+        imlec = b.cursor()
+        imlec.execute("""
+            INSERT INTO aktif_oturumlar (token, kullanici_turu, avm_id, avm_adi, magaza_id, magaza_adi) 
+            VALUES (%s, %s, %s, %s, %s, %s);
+        """, (yeni_token, kullanici_turu, avm_id, avm_adi, magaza_id, magaza_adi))
+    
+    st.query_params["token"] = yeni_token
+    st.session_state.update({
+        "giris_yapildi": True,
+        "kullanici_turu": kullanici_turu,
+        "aktif_avm_id": avm_id,
+        "aktif_avm_adi": avm_adi,
+        "aktif_magaza_id": magaza_id,
+        "aktif_magaza_adi": magaza_adi
+    })
+    st.rerun()
+
+# --- 5. AKILLI VERİ ÖNBELLEKLEME FONKSİYONLARI (HIZ SİHİRBAZLARI) ---
+@st.cache_data
+def veri_oku_avm_listesi():
+    with vt_baglan() as b:
+        imlec = b.cursor()
+        imlec.execute("SELECT id, avm_adi, lisans_bitis, odeme_durumu FROM avm_listesi;")
+        return imlec.fetchall()
+
+@st.cache_data
+def veri_oku_magazalar(avm_id):
+    with vt_baglan() as b:
+        imlec = b.cursor()
+        imlec.execute("SELECT id, adi, kat FROM magazalar WHERE avm_id = %s;", (avm_id,))
+        return imlec.fetchall()
+
+@st.cache_data
+def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
+    if isinstance(bas_tar, (list, tuple)):
+        bas_tar = bas_tar[0] if len(bas_tar) > 0 else datetime.date.today()
+    if isinstance(bit_tar, (list, tuple)):
+        bit_tar = bit_tar[1] if len(bit_tar) == 2 else (bit_tar[0] if len(bit_tar) > 0 else datetime.date.today())
+
+    with vt_baglan() as b:
+        query = """
+            SELECT c.tarih, m.adi as magaza_adi, m.kat, c.kdv_dahil, c.kdv_haric 
+            FROM gunluk_cirolar c 
+            JOIN magazalar m ON c.magaza_id = m.id 
+            WHERE c.avm_id = %s
+        """
+        df = pd.read_sql_query(query, b, params=(a_id,))
+        
+        if not df.empty:
+            bas_timestamp = pd.to_datetime(bas_tar)
+            bit_timestamp = pd.to_datetime(bit_tar)
+            df["tarih_gecici"] = pd.to_datetime(df["tarih"], format="%d-%m-%Y", errors='coerce')
+            df = df.dropna(subset=["tarih_gecici"])
+            df = df[(df["tarih_gecici"] >= bas_timestamp) & (df["tarih_gecici"] <= bit_timestamp)]
+            df = df.drop(columns=["tarih_gecici"])
+        return df
+
+# --- 6. KRİPTOGRAFİK ŞİFRELEME ---
+def sifre_hashle(sifre):
+    return hashlib.sha256(sifre.encode('utf-8')).hexdigest()
 
 # ==============================================================================
 # GİRİŞ EKRANI PANELI
@@ -135,9 +179,9 @@ if not st.session_state["giris_yapildi"]:
                 imlec.execute("SELECT deger FROM sistem_ayarlari WHERE anahtar = 'super_sifre';")
                 guncel_super_sifre = imlec.fetchone()[0]
             if sifre_hashle(super_sifre_input) == guncel_super_sifre:
-                st.session_state.update({"giris_yapildi": True, "kullanici_turu": "super"})
-                st.rerun()
-            else: st.error("❌ Hatalı Şifre!")
+                oturum_baslat("super")
+            else: 
+                st.error("❌ Hatalı Şifre!")
 
     elif tur == "AVM Yönetimi":
         tum_avmler = veri_oku_avm_listesi()
@@ -151,10 +195,11 @@ if not st.session_state["giris_yapildi"]:
                     imlec.execute("SELECT yonetici_sifre FROM avm_listesi WHERE id = %s;", (avm_sozluk[secilen_avm_adi],))
                     dogru_yonetim_hash = imlec.fetchone()[0]
                 if sifre_hashle(yonetim_sifre) == dogru_yonetim_hash:
-                    st.session_state.update({"giris_yapildi": True, "kullanici_turu": "yonetim", "aktif_avm_id": avm_sozluk[secilen_avm_adi], "aktif_avm_adi": secilen_avm_adi})
-                    st.rerun()
-                else: st.error("❌ Hatalı Şifre!")
-        else: st.warning("Sistemde henüz kayıtlı AVM bulunmuyor.")
+                    oturum_baslat("yonetim", avm_id=avm_sozluk[secilen_avm_adi], avm_adi=secilen_avm_adi)
+                else: 
+                    st.error("❌ Hatalı Şifre!")
+        else: 
+            st.warning("Sistemde henüz kayıtlı AVM bulunmuyor.")
                 
     elif tur == "Mağaza Girişi":
         avm_ler = veri_oku_avm_listesi()
@@ -173,10 +218,11 @@ if not st.session_state["giris_yapildi"]:
                         imlec.execute("SELECT sifre FROM magazalar WHERE id = %s;", (magaza_sozluk[secilen_magaza],))
                         dogru_magaza_hash = imlec.fetchone()[0]
                     if sifre_hashle(magaza_sifre) == dogru_magaza_hash:
-                        st.session_state.update({"giris_yapildi": True, "kullanici_turu": "magaza", "aktif_avm_id": m_avm_sozluk[g_secilen_avm], "aktif_avm_adi": g_secilen_avm, "aktif_magaza_id": magaza_sozluk[secilen_magaza], "aktif_magaza_adi": secilen_magaza})
-                        st.rerun()
-                    else: st.error("❌ Hatalı Şifre!")
-            else: st.warning("Bu AVM'ye ait mağaza bulunamadı.")
+                        oturum_baslat("magaza", avm_id=m_avm_sozluk[g_secilen_avm], avm_adi=g_secilen_avm, magaza_id=magaza_sozluk[secilen_magaza], magaza_adi=secilen_magaza)
+                    else: 
+                        st.error("❌ Hatalı Şifre!")
+            else: 
+                st.warning("Bu AVM'ye ait mağaza bulunamadı.")
 
 # ==============================================================================
 # SİSTEM İÇİ PANEL ALANLARI
@@ -186,6 +232,12 @@ else:
     with col_baslik: st.title("🏢 AVM Ciro Yönetim Portalı")
     with col_cikis:
         if st.button("🚪 Çıkış Yap"):
+            if "token" in st.query_params:
+                eski_token = st.query_params["token"]
+                with vt_baglan() as b:
+                    imlec = b.cursor()
+                    imlec.execute("DELETE FROM aktif_oturumlar WHERE token = %s;", (eski_token,))
+                del st.query_params["token"]
             st.session_state.update({"giris_yapildi": False, "kullanici_turu": None, "aktif_avm_id": None, "aktif_avm_adi": None, "aktif_magaza_id": None, "aktif_magaza_adi": None})
             st.rerun()
     st.markdown("---")
@@ -207,8 +259,7 @@ else:
                     with vt_baglan() as b:
                         imlec = b.cursor()
                         imlec.execute("DELETE FROM avm_listesi WHERE avm_adi = %s;", (silinecek_avm_adi,))
-                        b.commit()
-                    st.cache_data.clear()  # MUTASYON: Önbelleği temizle!
+                    st.cache_data.clear()
                     st.success(f"'{silinecek_avm_adi}' silindi.")
                     st.rerun()
         
@@ -226,11 +277,11 @@ else:
                     with vt_baglan() as b:
                         imlec = b.cursor()
                         imlec.execute("INSERT INTO avm_listesi (avm_adi, lisans_bitis, odeme_durumu, yonetici_sifre) VALUES (%s, %s, %s, %s);", (yeni_avm_adi, yeni_avm_lisans.strftime("%Y-%m-%d"), yeni_avm_odeme, sifre_hashle(yeni_avm_admin_sifre)))
-                        b.commit()
-                    st.cache_data.clear()  # MUTASYON: Önbelleği temizle!
+                    st.cache_data.clear()
                     st.success(f"🎉 '{yeni_avm_adi}' oluşturuldu!")
                     st.rerun()
-                except Exception as e: st.error(f"Veritabanı Hatası: {e}")
+                except Exception as e: 
+                    st.error(f"Veritabanı Hatası: {e}")
 
     # --------------------------------------------------------------------------
     # ROLE 2: AVM YÖNETİCİ PANELİ
@@ -271,7 +322,6 @@ else:
                 with m_col2: st.metric("Bugün Ciro Girenler", len(gonderen_listesi))
                 with m_col3: st.metric("Rapor Beklenenler", len(gondermeyen_listesi))
                 
-                # --- TARİH FİLTRELERİ (ÖNBELLEK DOSTU) ---
                 st.markdown("---")
                 st.subheader("🔍 Tarih Aralıklı Gelişmiş Analiz Filtreleri")
                 f_col1, f_col2, f_col3 = st.columns(3)
@@ -285,10 +335,13 @@ else:
                 with f_col3:
                     secilen_kat = st.selectbox("Kat Filtresi:", ["Tüm Katlar"] + sorted(list(magaza_df_all["kat"].unique())))
 
-                bas_tar = tarih_araligi[0] if isinstance(tarih_araligi, list) else tarih_araligi
-                bit_tar = tarih_araligi[1] if isinstance(tarih_araligi, list) and len(tarih_araligi) == 2 else bas_tar
+                if isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 2:
+                    bas_tar, bit_tar = tarih_araligi
+                elif isinstance(tarih_araligi, (list, tuple)) and len(tarih_araligi) == 1:
+                    bas_tar = bit_tar = tarih_araligi[0]
+                else:
+                    bas_tar = bit_tar = tarih_araligi
 
-                # Önbellekten veriyi çek (Uçuş modu!)
                 df_analiz = veri_oku_grafik_data(a_id, bas_tar, bit_tar).copy()
 
                 if not df_analiz.empty:
@@ -298,8 +351,8 @@ else:
                         df_analiz = df_analiz[df_analiz["kat"] == int(secilen_kat)]
 
                     if not df_analiz.empty:
-                        df_analiz["tarih_dt"] = pd.to_datetime(df_analiz["tarih"], format="%d-%m-%Y")
-                        df_analiz = df_analiz.sort_values("tarih_dt")
+                        df_analiz["tarih_dt"] = pd.to_datetime(df_analiz["tarih"], format="%d-%m-%Y", errors='coerce')
+                        df_analiz = df_analiz.dropna(subset=["tarih_dt"]).sort_values("tarih_dt")
 
                         kpi1, kpi2, kpi3 = st.columns(3)
                         with kpi1: st.metric("Toplam Ciro (KDV Dahil)", f"{df_analiz['kdv_dahil'].sum():,.2f} TL")
@@ -315,9 +368,12 @@ else:
                             st.bar_chart(data=df_analiz.groupby("magaza_adi")["kdv_dahil"].sum().reset_index(), x="magaza_adi", y="kdv_dahil")
                         with tab_tablo:
                             st.dataframe(df_analiz[["tarih", "magaza_adi", "kat", "kdv_dahil", "kdv_haric"]], use_container_width=True)
-                    else: st.info("Uygun ciro verisi bulunamadı.")
-                else: st.info("Seçilen tarih aralığında ciro kaydı yok.")
-            else: st.warning("Henüz mağaza yok.")
+                    else: 
+                        st.info("Uygun ciro verisi bulunamadı.")
+                else: 
+                    st.info("Seçilen tarih aralığında ciro kaydı yok.")
+            else: 
+                st.warning("Henüz mağaza yok.")
 
         elif secenek == "📸 Kasa Fotoğrafları":
             st.header("📸 Z-Raporu Denetimi")
@@ -327,7 +383,8 @@ else:
                 veriler = imlec.fetchall()
             for tarih, adi, ciro, foto_blob in veriler:
                 with st.expander(f"📷 {tarih} - {adi} ({ciro} TL)"):
-                    if foto_blob: st.image(Image.open(io.BytesIO(bytes(foto_blob))), width=400)
+                    if foto_blob: 
+                        st.image(Image.open(io.BytesIO(bytes(foto_blob))), width=400)
 
         elif secenek == "⚙️ Mağaza ve Şifre Ayarları":
             st.header("⚙️ Mağaza Yönetim Alanı")
@@ -337,20 +394,29 @@ else:
                 if yuklenen_excel is not None:
                     try:
                         df_ex = pd.read_excel(yuklenen_excel)
+                        df_ex.columns = [col.strip() for col in df_ex.columns]
+                        
                         if all(col in df_ex.columns for col in ["Mağaza Adı", "Kat", "Giriş Şifresi"]):
                             if st.button("🚀 Excel'den Aktar"):
                                 with vt_baglan() as b:
                                     imlec = b.cursor()
                                     for _, satir in df_ex.iterrows():
-                                        if str(satir["Mağaza Adı"]).strip():
+                                        m_adi = str(satir["Mağaza Adı"]).strip()
+                                        if m_adi and m_adi != "nan":
+                                            try:
+                                                kat_no = int(satir["Kat"])
+                                            except:
+                                                kat_no = 0
+                                            sifre_str = str(satir["Giriş Şifresi"]).strip().split('.')[0]
                                             imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre) VALUES (%s, %s, %s, %s);", 
-                                                           (a_id, str(satir["Mağaza Adı"]).strip(), int(satir["Kat"]), sifre_hashle(str(satir["Giriş Şifresi"]).strip())))
-                                    b.commit()
-                                st.cache_data.clear()  # MUTASYON: Önbelleği uçur!
-                                st.success("Mağazalar aktarıldı.")
+                                                           (a_id, m_adi, kat_no, sifre_hashle(sifre_str)))
+                                st.cache_data.clear()
+                                st.success("Mağazalar başarıyla aktarıldı.")
                                 st.rerun()
-                        else: st.error("Sütunlar hatalı!")
-                    except Exception as e: st.error(f"Hata: {e}")
+                        else: 
+                            st.error("Excel sütun isimleri hatalı!")
+                    except Exception as e: 
+                        st.error(f"Hata oluştu: {e}")
 
             with st.expander("➕ Tek Tek Yeni Mağaza Ekle"):
                 yeni_m_adi = st.text_input("Mağaza Adı:")
@@ -361,8 +427,7 @@ else:
                         with vt_baglan() as b:
                             imlec = b.cursor()
                             imlec.execute("INSERT INTO magazalar (avm_id, adi, kat, sifre) VALUES (%s, %s, %s, %s);", (a_id, yeni_m_adi, yeni_m_kat, sifre_hashle(yeni_m_sifre)))
-                            b.commit()
-                        st.cache_data.clear()  # MUTASYON: Önbelleği uçur!
+                        st.cache_data.clear()
                         st.success(f"✓ {yeni_m_adi} eklendi.")
                         st.rerun()
             
@@ -375,8 +440,7 @@ else:
                         with vt_baglan() as b:
                             imlec = b.cursor()
                             imlec.execute("DELETE FROM magazalar WHERE id = %s;", (m_sil_sozluk[silinecek_m_adi],))
-                            b.commit()
-                        st.cache_data.clear()  # MUTASYON: Önbelleği uçur!
+                        st.cache_data.clear()
                         st.success(f"'{silinecek_m_adi}' silindi.")
                         st.rerun()
 
@@ -413,13 +477,14 @@ else:
                         with vt_baglan() as b:
                             imlec = b.cursor()
                             imlec.execute("INSERT INTO gunluk_cirolar (avm_id, magaza_id, tarih, kdv_dahil, kdv_haric, kasa_foto) VALUES (%s, %s, %s, %s, %s, %s);", (a_id, m_id, tarih_formatli, kdv_dahil, kdv_haric, psycopg2.Binary(foto_byte)))
-                            b.commit()
-                        st.cache_data.clear()  # MUTASYON: Mağaza yeni ciro girdiğinde tüm yönetici grafiklerini otomatik yenile!
+                        st.cache_data.clear()
                         st.success(f"🎉 Başarıyla buluta işlendi!")
                         st.rerun()
-                    else: st.error("Lütfen z-raporu fotoğrafını sisteme yükleyin!")
+                    else: 
+                        st.error("Lütfen z-raporu fotoğrafını sisteme yükleyin!")
                         
         with sekme_rapor:
             with vt_baglan() as b:
                 df_magaza_ozel = pd.read_sql_query("SELECT tarih, kdv_dahil, kdv_haric FROM gunluk_cirolar WHERE magaza_id = %s ORDER BY id DESC", b, params=(m_id,))
-            if not df_magaza_ozel.empty: st.dataframe(df_magaza_ozel, use_container_width=True)
+            if not df_magaza_ozel.empty: 
+                st.dataframe(df_magaza_ozel, use_container_width=True)
