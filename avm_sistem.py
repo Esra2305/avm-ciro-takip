@@ -55,12 +55,10 @@ def veri_oku_magazalar(avm_id):
         imlec = b.cursor()
         imlec.execute("SELECT id, adi, kat FROM magazalar WHERE avm_id = %s;", (avm_id,))
         return imlec.fetchall()
-
 @st.cache_data
 def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
     """Grafik ve analiz tablosu verilerini önbelleğe alarak dashboard'u uçurur."""
     with vt_baglan() as b:
-        # Ağır tarih dönüşümünü veritabanından alıp sadeleştiriyoruz
         query = """
             SELECT c.tarih, m.adi as magaza_adi, m.kat, c.kdv_dahil, c.kdv_haric 
             FROM gunluk_cirolar c 
@@ -69,10 +67,15 @@ def veri_oku_grafik_data(a_id, bas_tar, bit_tar):
         """
         df = pd.read_sql_query(query, b, params=(a_id,))
         
-        # Filtrelemeyi Python/Pandas içinde güvenli ve jet hızında yapıyoruz
         if not df.empty:
-            df["tarih_gecici"] = pd.to_datetime(df["tarih"], format="%d-%m-%Y").dt.date
-            df = df[(df["tarih_gecici"] >= bas_tar) & (df["tarih_gecici"] <= bit_tar)]
+            # HATA ÖNLEYİCİ: İki tarafı da tamamen aynı Pandas 'Timestamp' tipine zorluyoruz
+            bas_timestamp = pd.to_datetime(bas_tar)
+            bit_timestamp = pd.to_datetime(bit_tar)
+            
+            df["tarih_gecici"] = pd.to_datetime(df["tarih"], format="%d-%m-%Y")
+            
+            # Artık iki taraf da kusursuz şekilde eşleştiği için Python 3.14 hata vermeden süzecek
+            df = df[(df["tarih_gecici"] >= bas_timestamp) & (df["tarih_gecici"] <= bit_timestamp)]
             df = df.drop(columns=["tarih_gecici"])
         return df
 
